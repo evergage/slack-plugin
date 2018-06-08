@@ -82,7 +82,7 @@ public class ActiveNotifier implements FineGrainedNotifier {
         if (changes != null) {
             notifyStart(build, changes);
         } else {
-            notifyStart(build, getBuildStatusMessage(build, false, false, notifier.includeCustomMessage()));
+            notifyStart(build, getBuildStatusMessage(build, false, false, notifier.includeCustomMessage(), notifier.getCommitInfoChoice()));
         }
     }
 
@@ -106,10 +106,7 @@ public class ActiveNotifier implements FineGrainedNotifier {
         Result previousResult = (previousBuild != null) ? previousBuild.getResult() : Result.SUCCESS;
         if((result.isWorseThan(previousResult) || moreTestFailuresThanPreviousBuild(r, previousBuild)) && notifier.getNotifyRegression()) {
             getSlack(r).publish(getBuildStatusMessage(r, notifier.includeTestSummary(),
-                    notifier.includeFailedTests(), notifier.includeCustomMessage()), getBuildColor(r));
-            if (notifier.getCommitInfoChoice().showAnything()) {
-                getSlack(r).publish(getCommitList(r), getBuildColor(r));
-            }
+                    notifier.includeFailedTests(), notifier.includeCustomMessage(), notifier.getCommitInfoChoice()), getBuildColor(r));
         }
     }
 
@@ -135,10 +132,7 @@ public class ActiveNotifier implements FineGrainedNotifier {
                 || (result == Result.SUCCESS && notifier.getNotifySuccess())
                 || (result == Result.UNSTABLE && notifier.getNotifyUnstable())) {
             getSlack(r).publish(getBuildStatusMessage(r, notifier.includeTestSummary(),
-                    notifier.includeFailedTests(), notifier.includeCustomMessage()), getBuildColor(r));
-            if (notifier.getCommitInfoChoice().showAnything()) {
-                getSlack(r).publish(getCommitList(r), getBuildColor(r));
-            }
+                    notifier.includeFailedTests(), notifier.includeCustomMessage(), notifier.getCommitInfoChoice()), getBuildColor(r));
         }
     }
 
@@ -216,7 +210,7 @@ public class ActiveNotifier implements FineGrainedNotifier {
             logger.info("Empty change...");
             Cause.UpstreamCause c = (Cause.UpstreamCause)r.getCause(Cause.UpstreamCause.class);
             if (c == null) {
-                return "No Changes.";
+                return "\nNo Changes.";
             }
             String upProjectName = c.getUpstreamProject();
             int buildNumber = c.getUpstreamBuild();
@@ -236,10 +230,10 @@ public class ActiveNotifier implements FineGrainedNotifier {
             }
             commits.add(commit.toString());
         }
-        MessageBuilder message = new MessageBuilder(notifier, r);
-        message.append("Changes:\n- ");
-        message.append(StringUtils.join(commits, "\n- "));
-        return message.toString();
+        StringBuilder stringBuilder = new StringBuilder();
+        stringBuilder.append("\n    Changes:\n- ");
+        stringBuilder.append(StringUtils.join(commits, "\n- "));
+        return stringBuilder.toString();
     }
 
     static String getBuildColor(AbstractBuild r) {
@@ -253,10 +247,15 @@ public class ActiveNotifier implements FineGrainedNotifier {
         }
     }
 
-    String getBuildStatusMessage(AbstractBuild r, boolean includeTestSummary, boolean includeFailedTests, boolean includeCustomMessage) {
+    String getBuildStatusMessage(
+            AbstractBuild r, boolean includeTestSummary, boolean includeFailedTests, boolean includeCustomMessage,
+            CommitInfoChoice commitInfoChoice) {
         MessageBuilder message = new MessageBuilder(notifier, r);
         message.appendStatusMessage();
         message.appendDuration();
+        if (includeTestSummary) {
+            message.appendFailedTestCount();
+        }
         message.appendOpenLink();
         if (includeTestSummary) {
             message.appendTestSummary();
@@ -266,6 +265,9 @@ public class ActiveNotifier implements FineGrainedNotifier {
         }
         if (includeCustomMessage) {
             message.appendCustomMessage();
+        }
+        if (commitInfoChoice.showAnything()) {
+            message.append(getCommitList(r));
         }
         return message.toString();
     }
@@ -284,7 +286,7 @@ public class ActiveNotifier implements FineGrainedNotifier {
                                     UNSTABLE_STATUS_MESSAGE = "Unstable",
                                     REGRESSION_STATUS_MESSAGE = "Regression",
                                     UNKNOWN_STATUS_MESSAGE = "Unknown";
-        
+
         private StringBuffer message;
         private SlackNotifier notifier;
         private AbstractBuild build;
@@ -310,20 +312,20 @@ public class ActiveNotifier implements FineGrainedNotifier {
             Run previousBuild = r.getProject().getLastBuild().getPreviousBuild();
             Run previousSuccessfulBuild = r.getPreviousSuccessfulBuild();
             boolean buildHasSucceededBefore = previousSuccessfulBuild != null;
-            
+
             /*
              * If the last build was aborted, go back to find the last non-aborted build.
              * This is so that aborted builds do not affect build transitions.
              * I.e. if build 1 was failure, build 2 was aborted and build 3 was a success the transition
-             * should be failure -> success (and therefore back to normal) not aborted -> success. 
+             * should be failure -> success (and therefore back to normal) not aborted -> success.
              */
             Run lastNonAbortedBuild = previousBuild;
             while(lastNonAbortedBuild != null && lastNonAbortedBuild.getResult() == Result.ABORTED) {
                 lastNonAbortedBuild = lastNonAbortedBuild.getPreviousBuild();
             }
-            
-            
-            /* If all previous builds have been aborted, then use 
+
+
+            /* If all previous builds have been aborted, then use
              * SUCCESS as a default status so an aborted message is sent
              */
             if(lastNonAbortedBuild == null) {
@@ -331,13 +333,13 @@ public class ActiveNotifier implements FineGrainedNotifier {
             } else {
                 previousResult = lastNonAbortedBuild.getResult();
             }
-            
+
             /* Back to normal should only be shown if the build has actually succeeded at some point.
-             * Also, if a build was previously unstable and has now succeeded the status should be 
+             * Also, if a build was previously unstable and has now succeeded the status should be
              * "Back to normal"
              */
             if (result == Result.SUCCESS
-                    && (previousResult == Result.FAILURE || previousResult == Result.UNSTABLE) 
+                    && (previousResult == Result.FAILURE || previousResult == Result.UNSTABLE)
                     && buildHasSucceededBefore && notifier.getNotifyBackToNormal()) {
                 return BACK_TO_NORMAL_STATUS_MESSAGE;
             }
@@ -398,6 +400,15 @@ public class ActiveNotifier implements FineGrainedNotifier {
                 durationString = build.getDurationString();
             }
             message.append(durationString);
+            return this;
+        }
+
+        public MessageBuilder appendFailedTestCount() {
+            AbstractTestResultAction<?> action = this.build
+                    .getAction(AbstractTestResultAction.class);
+            if (action.getFailCount() > 0) {
+                message.append(" Failed: " + action.getFailCount());
+            }
             return this;
         }
 
